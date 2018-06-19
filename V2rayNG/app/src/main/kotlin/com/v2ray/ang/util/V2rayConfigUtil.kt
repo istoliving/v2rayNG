@@ -1,5 +1,6 @@
 package com.v2ray.ang.util
 
+import android.os.Build
 import android.text.TextUtils
 import android.util.Log
 import com.google.gson.Gson
@@ -12,6 +13,7 @@ import com.v2ray.ang.ui.SettingsActivity
 import org.json.JSONArray
 import org.json.JSONException
 import org.json.JSONObject
+import java.util.logging.Logger
 
 object V2rayConfigUtil {
     private val lib2rayObj: JSONObject by lazy {
@@ -97,7 +99,7 @@ object V2rayConfigUtil {
             if (config.index < 0
                     || config.vmess.count() <= 0
                     || config.index > config.vmess.count() - 1
-                    ) {
+            ) {
                 return result
             }
 
@@ -124,7 +126,7 @@ object V2rayConfigUtil {
             if (config.index < 0
                     || config.vmess.count() <= 0
                     || config.index > config.vmess.count() - 1
-                    ) {
+            ) {
                 return result
             }
 
@@ -152,6 +154,8 @@ object V2rayConfigUtil {
             //增加lib2ray
             val finalConfig = addLib2ray(v2rayConfig, app)
 
+            Log.d("config", finalConfig)
+
             result.status = true
             result.content = finalConfig
             return result
@@ -172,7 +176,7 @@ object V2rayConfigUtil {
             if (config.index < 0
                     || config.vmess.count() <= 0
                     || config.index > config.vmess.count() - 1
-                    ) {
+            ) {
                 return result
             }
             val vmess = config.vmess[config.index]
@@ -213,10 +217,24 @@ object V2rayConfigUtil {
             v2rayConfig.outbound.streamSettings = boundStreamSettings(config)
 
             //如果非ip
-            if (!Utils.isIpAddress(vmess.address)) {
-                lib2rayObj.optJSONObject("preparedDomainName")
-                        .optJSONArray("domainName")
-                        .put(String.format("%s:%s", vmess.address, vmess.port))
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.KITKAT) {
+                if (!Utils.isIpAddress(vmess.address)) {
+                    val addr = String.format("%s:%s", vmess.address, vmess.port)
+                    val domainName = lib2rayObj.optJSONObject("preparedDomainName")
+                            .optJSONArray("domainName")
+                    if (domainName.length() > 0) {
+                        for (index in 0 until domainName.length()) {
+                            domainName.remove(index)
+                        }
+                    }
+                    domainName.put(addr)
+                }
+            } else {
+                if (!Utils.isIpAddress(vmess.address)) {
+                    lib2rayObj.optJSONObject("preparedDomainName")
+                            .optJSONArray("domainName")
+                            .put(String.format("%s:%s", vmess.address, vmess.port))
+                }
             }
         } catch (e: Exception) {
             e.printStackTrace()
@@ -229,7 +247,7 @@ object V2rayConfigUtil {
      * 远程服务器底层传输配置
      */
     private fun boundStreamSettings(config: AngConfig): V2rayConfig.OutboundBean.StreamSettingsBean {
-        val streamSettings = V2rayConfig.OutboundBean.StreamSettingsBean("", "", null, null, null)
+        val streamSettings = V2rayConfig.OutboundBean.StreamSettingsBean("", "", null, null, null, null, null)
         try {
             //远程服务器底层传输配置
             streamSettings.network = config.vmess[config.index].network
@@ -253,15 +271,36 @@ object V2rayConfigUtil {
                 "ws" -> {
                     val wssettings = V2rayConfig.OutboundBean.StreamSettingsBean.WssettingsBean()
                     wssettings.connectionReuse = true
-                    val lstParameter = config.vmess[config.index].requestHost.split(";")
-                    if (lstParameter.size > 0) {
-                        wssettings.path = lstParameter.get(0)
-                    }
-                    if (lstParameter.size > 1) {
+                    val host = config.vmess[config.index].requestHost.trim()
+                    val path = config.vmess[config.index].path.trim()
+
+                    if (!TextUtils.isEmpty(host)) {
                         wssettings.headers = V2rayConfig.OutboundBean.StreamSettingsBean.WssettingsBean.HeadersBean()
-                        wssettings.headers.Host = lstParameter.get(1)
+                        wssettings.headers.Host = host
+                    }
+                    if (!TextUtils.isEmpty(path)) {
+                        wssettings.path = path
                     }
                     streamSettings.wssettings = wssettings
+
+                    val tlssettings = V2rayConfig.OutboundBean.StreamSettingsBean.TlssettingsBean()
+                    tlssettings.allowInsecure = true
+                    streamSettings.tlssettings = tlssettings
+                }
+                "h2" -> {
+                    val httpsettings = V2rayConfig.OutboundBean.StreamSettingsBean.HttpsettingsBean()
+                    val host = config.vmess[config.index].requestHost.trim()
+                    val path = config.vmess[config.index].path.trim()
+
+                    if (!TextUtils.isEmpty(host)) {
+                        httpsettings.host = host.split(",").map { it.trim() }
+                    }
+                    httpsettings.path = path
+                    streamSettings.httpsettings = httpsettings
+
+                    val tlssettings = V2rayConfig.OutboundBean.StreamSettingsBean.TlssettingsBean()
+                    tlssettings.allowInsecure = true
+                    streamSettings.tlssettings = tlssettings
                 }
                 else -> {
                     //tcp带http伪装
@@ -383,9 +422,12 @@ object V2rayConfigUtil {
                 userRule
                         .split(",")
                         .forEach {
-                            if (Utils.isIpAddress(it)) {
+                            if (Utils.isIpAddress(it) || it.startsWith("geoip:")) {
                                 rulesIP.ip?.add(it)
-                            } else if (Utils.isValidUrl(it)) {
+                            } else if (Utils.isValidUrl(it)
+                                    || it.startsWith("geosite:")
+                                    || it.startsWith("regexp:")
+                                    || it.startsWith("domain:")) {
                                 rulesDomain.domain?.add(it)
                             }
                         }
@@ -426,13 +468,13 @@ object V2rayConfigUtil {
             val jObj = JSONObject(conf)
             jObj.put("#lib2ray", lib2rayObj)
 
-            val speedupDomain = app.defaultDPreference.getPrefBoolean(SettingsActivity.PREF_SPEEDUP_DOMAIN, false)
-            if (speedupDomain) {
-                jObj.optJSONObject("routing")
-                        .optJSONObject("settings")
-                        .optJSONArray("rules")
-                        .put(0, ruleDirectDnsObj)
-            }
+//            val speedupDomain = app.defaultDPreference.getPrefBoolean(SettingsActivity.PREF_SPEEDUP_DOMAIN, false)
+//            if (speedupDomain) {
+//                jObj.optJSONObject("routing")
+//                        .optJSONObject("settings")
+//                        .optJSONArray("rules")
+//                        .put(0, ruleDirectDnsObj)
+//            }
 
             return jObj.toString()
         } catch (e: Exception) {
